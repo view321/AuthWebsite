@@ -45,7 +45,7 @@ func main() {
 	app := fiber.New()
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
-		AllowMethods:     "*",
+		AllowMethods:     "POST, GET",
 		AllowOrigins:     "http://127.0.0.1:8080",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authentication",
 		AllowCredentials: true,
