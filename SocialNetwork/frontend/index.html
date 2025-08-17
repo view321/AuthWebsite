@@ -1,355 +1,169 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Leaflet Map with Right-Click Popup, Login/Register, and Notes</title>
+  <title>GeoNotes - Interactive Map Notes</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+  <!-- External Libraries -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin=""/>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: sans-serif;
-    }
-
-    #map {
-      width: 100%;
-      height: 1080px;
-    }
-
-    .popup-content {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-
-    .popup-content input, .popup-content button, .popup-content select {
-      padding: 5px;
-      font-size: 14px;
-    }
-
-    #profile-button, #logout-button {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      padding: 8px 12px;
-      background-color: #007bff;
-      color: white;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-      z-index: 1000;
-    }
-
-    #logout-button {
-      right: 95px;
-      background-color: #dc3545;
-    }
-
-    #profile-form {
-      position: absolute;
-      top: 50px;
-      right: 10px;
-      background-color: white;
-      border: 1px solid #ccc;
-      padding: 15px;
-      border-radius: 5px;
-      z-index: 1001;
-      display: none;
-      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-    }
-
-    #profile-form label {
-      display: block;
-      margin-bottom: 5px;
-    }
-
-    #profile-form input {
-      width: 200px;
-      padding: 8px;
-      margin-bottom: 10px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-    }
-
-    #profile-form button {
-      padding: 8px 12px;
-      background-color: #28a745;
-      color: white;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-
-    .note-popup-content {
-      font-size: 14px;
-    }
-  </style>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+  
+  <!-- Application Styles -->
+  <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 
-  <div id="map"></div>
-  <button id="profile-button">Profile</button>
-  <button id="logout-button" style="display:none;">Logout</button>
+  <div class="app-container">
+    <div id="map"></div>
+    
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <i class="fas fa-map-marker-alt"></i>
+        GeoNotes
+      </div>
+      <div class="auth-buttons">
+        <button id="profile-button" class="btn btn-primary">
+          <i class="fas fa-user"></i>
+          Sign In
+        </button>
+        <button id="logout-button" class="btn btn-danger" style="display:none;">
+          <i class="fas fa-sign-out-alt"></i>
+          Logout
+        </button>
+      </div>
+    </div>
 
-  <div id="profile-form">
-    <label for="username">Username:</label>
-    <input type="text" id="username" name="username"><br><br>
-    <label for="password">Password:</label>
-    <input type="password" id="password" name="password"><br><br>
-    <button id="login-button">Login</button>
-    <button id="register-button">Register</button>
+    <!-- Instructions -->
+    <div class="instructions" id="instructions">
+      <h3>
+        <span>
+          <i class="fas fa-info-circle"></i>
+          How to use
+        </span>
+        <button class="instructions-close" id="instructions-close">
+          <i class="fas fa-times"></i>
+        </button>
+      </h3>
+      <p><strong>Right-click</strong> anywhere on the map to add a note</p>
+      <p><strong>Public notes</strong> are visible to everyone</p>
+      <p><strong>Private notes</strong> can be shared with specific users</p>
+    </div>
+
+    <!-- Instructions Toggle Button -->
+    <button class="instructions-toggle" id="instructions-toggle">
+      <i class="fas fa-info-circle"></i>
+    </button>
   </div>
 
+  <!-- Auth Modal -->
+  <div id="auth-modal" class="auth-modal">
+    <div class="auth-card">
+      <button class="close-modal" id="close-modal">
+        <i class="fas fa-times"></i>
+      </button>
+      
+      <div class="auth-header">
+        <h2>Welcome to GeoNotes</h2>
+        <p>Sign in to create and manage your location-based notes</p>
+      </div>
+
+      <form id="auth-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required>
+        </div>
+
+        <div class="auth-actions">
+          <button type="button" id="login-button" class="btn btn-primary">
+            <i class="fas fa-sign-in-alt"></i>
+            Login
+          </button>
+          <button type="button" id="register-button" class="btn btn-secondary">
+            <i class="fas fa-user-plus"></i>
+            Register
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Note Modal for Long Notes -->
+  <div id="note-modal" class="note-modal">
+    <div class="note-modal-content">
+      <div class="note-modal-header">
+        <h3>Note Details</h3>
+        <button class="note-modal-close" id="note-modal-close">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="note-modal-author" id="note-modal-author"></div>
+      <div class="note-modal-body" id="note-modal-body"></div>
+      <div class="note-modal-actions" id="note-modal-actions"></div>
+    </div>
+  </div>
+
+  <!-- Create Note Modal -->
+  <div id="create-note-modal" class="create-note-modal">
+    <div class="create-note-card">
+      <button class="create-note-close" id="create-note-close">
+        <i class="fas fa-times"></i>
+      </button>
+      
+      <div class="create-note-header">
+        <h2>Create New Note</h2>
+        <p>Add a note to this location on the map</p>
+      </div>
+
+      <form id="create-note-form" class="create-note-form">
+        <div class="form-field">
+          <label for="note-text">Message</label>
+          <textarea id="note-text" placeholder="Enter your message (press Enter for new lines)" required></textarea>
+        </div>
+        
+        <div class="form-field">
+          <label for="note-privacy">Privacy</label>
+          <select id="note-privacy">
+            <option value="true">Public</option>
+            <option value="false">Private</option>
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label for="note-allowed-users">Allowed Users (comma-separated)</label>
+          <input type="text" id="note-allowed-users" placeholder="Enter usernames separated by commas">
+        </div>
+
+        <div class="create-note-actions">
+          <button type="button" id="cancel-note-btn" class="btn btn-secondary">
+            <i class="fas fa-times"></i>
+            Cancel
+          </button>
+          <button type="button" id="send-note-btn" class="btn btn-primary">
+            <i class="fas fa-paper-plane"></i>
+            Create Note
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- External Libraries -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin=""></script>
 
-  <script>
-    var map = L.map('map').setView([51.505, -0.09], 13);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(map);
-
-
-    let authToken = null;
-    let notesLayerGroup = L.layerGroup().addTo(map);
-    const profileButton = document.getElementById('profile-button');
-    const logoutButton = document.getElementById('logout-button');
-    const profileForm = document.getElementById('profile-form');
-
-    // Function to fetch notes within the current map bounds
-    function fetchNotes() {
-        const bounds = map.getBounds();
-
-        const data = {
-            upper_lattitude: bounds.getNorth(),
-            lower_lattitude: bounds.getSouth(),
-            upper_longitude: bounds.getEast(),
-            lower_longitude: bounds.getWest()
-        };
-
-        fetch('/api/view_permission/get_within_square', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': authToken ? `Bearer ${authToken}` : ''
-            },
-            body: JSON.stringify(data)
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Failed to fetch notes');
-            }
-            return response.json();
-        })
-        .then(notes => {
-            displayNotes(notes);
-        })
-        .catch(error => {
-            console.error('Error fetching notes:', error);
-        });
-    }
-
-
-
-    // Function to display notes on the map
-    function displayNotes(notes) {
-        notesLayerGroup.clearLayers();
-
-        notes.forEach(note => {
-            const marker = L.marker([note.lattitude, note.longitude]).addTo(notesLayerGroup);
-            marker.bindPopup(`<div class="note-popup-content"><b>${note.user_id}</b>: ${note.text}</div>`);
-        });
-    }
-
-
-    // Initial fetch of notes when the map loads
-    fetchNotes();
-
-    // Fetch notes whenever the map is moved
-    map.on('moveend', fetchNotes);
-
-
-    // Function to handle right-click
-    map.on('contextmenu', function(e) {
-      L.DomEvent.preventDefault(e);
-
-      // Create the popup content with input and button
-      var popupContent = document.createElement('div');
-      popupContent.classList.add('popup-content');
-
-      var inputField = document.createElement('input');
-      inputField.type = 'text';
-      inputField.placeholder = 'Enter your message';
-      popupContent.appendChild(inputField);
-
-      //Public/Private
-      var publicSelect = document.createElement('select');
-      var publicOption = document.createElement('option');
-      publicOption.value = 'true';
-      publicOption.textContent = 'Public';
-      var privateOption = document.createElement('option');
-      privateOption.value = 'false';
-      privateOption.textContent = 'Private';
-      publicSelect.appendChild(publicOption);
-      publicSelect.appendChild(privateOption);
-      popupContent.appendChild(publicSelect);
-
-      //Allowed Users
-      var allowedUsersInput = document.createElement('input');
-      allowedUsersInput.type = 'text';
-      allowedUsersInput.placeholder = 'Allowed users (comma-separated)';
-      popupContent.appendChild(allowedUsersInput);
-
-      var sendButton = document.createElement('button');
-      sendButton.textContent = 'Send Message';
-      popupContent.appendChild(sendButton);
-
-
-      // Create the popup
-      var popup = L.popup()
-        .setLatLng(e.latlng)
-        .setContent(popupContent)
-        .openOn(map);
-
-      // Add event listener to the button
-      sendButton.addEventListener('click', function() {
-        var message = inputField.value;
-        var lat = e.latlng.lat;
-        var lng = e.latlng.lng;
-        var publicValue = publicSelect.value === 'true';
-        var allowedUsers = allowedUsersInput.value.split(',').map(s => s.trim()).filter(s => s !== ''); // Split and trim
-        
-
-        // Prepare the data to send in the HTTP request
-        var data = {
-          text: message,
-          longitude: lng,
-          lattitude: lat,
-          public: publicValue,
-          allowed_users: allowedUsers
-        };
-
-        // Make the HTTP request (using fetch API)
-        fetch('/api/login_protected/create_note', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': authToken ? `Bearer ${authToken}` : '' // Include token
-          },
-          body: JSON.stringify(data)
-        })
-        .then(response => {
-            console.log(allowedUsers)
-          if (!response.ok) {
-            throw new Error('Failed to create note');
-          }
-          return response.json();
-        })
-        .then(responseData => {
-          console.log('Success:', responseData);
-          alert('Note created successfully!');
-          map.closePopup();
-          fetchNotes(); // Refresh notes
-        })
-        .catch(error => {
-          console.error('Error:', error);
-          alert('An error occurred while creating the note.');
-        });
-      });
-    });
-
-
-    // Profile Button Logic
-
-    profileButton.addEventListener('click', function() {
-      profileForm.style.display = (profileForm.style.display === 'none' ? 'block' : 'none');
-    });
-
-    logoutButton.addEventListener('click', function() {
-        authToken = null; // Clear the token
-        logoutButton.style.display = 'none';
-        profileButton.style.display = 'block';
-        profileForm.style.display = 'none'; //Hide Form just in case
-        alert('Logged out successfully!');
-
-        //Refresh Notes to show Public only:
-        fetchNotes();
-    });
-
-    const loginButton = document.getElementById('login-button');
-    const registerButton = document.getElementById('register-button');
-
-    loginButton.addEventListener('click', function() {
-      const username = document.getElementById('username').value;
-      const password = document.getElementById('password').value;
-
-      const data = { username: username, password: password };
-
-      fetch('/api/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(data)
-      })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error('Login failed');
-        }
-        return response.json();
-      })
-      .then(responseData => {
-        console.log('Login successful:', responseData);
-        alert('Login successful!');
-        authToken = responseData.token;  // Store the token
-        profileForm.style.display = 'none';
-        profileButton.style.display = 'none';
-        logoutButton.style.display = 'block'; // Show logout button
-        fetchNotes(); // Refresh Notes
-      })
-      .catch(error => {
-        console.error('Login error:', error);
-        alert('Login failed: ' + error);
-      });
-    });
-
-    registerButton.addEventListener('click', function() {
-      const username = document.getElementById('username').value;
-      const password = document.getElementById('password').value;
-
-      const data = { username: username, password: password };
-
-      fetch('/api/register_user', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(data)
-      })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error('Registration failed');
-        }
-        return response.json();
-      })
-      .then(responseData => {
-        console.log('Registration successful:', responseData);
-        alert('Registration successful!');
-        profileForm.style.display = 'none';
-      })
-      .catch(error => {
-        console.error('Registration error:', error);
-        alert('Registration failed: ' + error);
-      });
-    });
-
-  </script>
+  <!-- Application Scripts -->
+  <script type="module" src="js/app.js"></script>
 
 </body>
 </html>

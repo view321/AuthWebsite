@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -29,7 +30,8 @@ type NoteData struct {
 
 var notes_db *sql.DB
 var jwtSecret = []byte("my_key_123")
-var blacklist = make(map[string]bool)
+var blacklist []string
+var blacklistMutex sync.RWMutex
 
 func main() {
 	dsn := "root:347347@tcp(127.0.0.1:3306)/notes_db"
@@ -45,16 +47,15 @@ func main() {
 	app := fiber.New()
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
-		AllowMethods:     "POST, GET",
-		AllowOrigins:     "http://127.0.0.1:8080",
-		AllowHeaders:     "Origin, Content-Type, Accept, Authentication",
+		AllowMethods:     "POST, GET, DELETE, PATCH, OPTIONS",
+		AllowOrigins:     "http://127.0.0.1:8080, http://localhost:8080",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authentication, Set-Cookie, Cookie",
 		AllowCredentials: true,
 	}))
 	api := app.Group("/api")
 
 	login_protected := api.Group("/login_protected")
 	login_protected.Use(jwtMiddleware(jwtSecret))
-	login_protected.Use(jwtBlacklist)
 
 	edit_permission := login_protected.Group("/edit_permission/:id")
 	edit_permission.Use(NotePermissionCheck)
@@ -73,6 +74,7 @@ func main() {
 	api.Post("/login", LogIn)
 	api.Post("/register_user", RegisterUser)
 	login_protected.Post("/logout", LogOut)
+	login_protected.Get("/check_session", CheckSession)
 
 	app.Static("/", "../frontend/")
 	log.Fatal(app.Listen(":8080"))
@@ -80,18 +82,8 @@ func main() {
 
 func optionalJWT(secretKey []byte) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		authHeader := c.Get("Authorization")
-		if authHeader == "" {
-			c.Locals("Registered", false)
-			return c.Next()
-		}
-
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			c.Locals("Registered", false)
-			return c.Next()
-		}
-		tokenString := parts[1]
+		jwt_from_cookie := c.Cookies("jwt")
+		tokenString := jwt_from_cookie
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			// Check the signing method
@@ -107,10 +99,12 @@ func optionalJWT(secretKey []byte) fiber.Handler {
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			if blacklist[tokenString] {
+			blacklistMutex.RLock()
+			if slices.Contains(blacklist, tokenString) {
 				c.Locals("Registered", false)
 				return c.Next()
 			}
+			blacklistMutex.RUnlock()
 			c.Locals("Registered", true)
 			c.Locals("user", claims)
 			return c.Next()
@@ -123,20 +117,19 @@ func optionalJWT(secretKey []byte) fiber.Handler {
 
 func jwtMiddleware(secretKey []byte) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		authHeader := c.Get("Authorization")
-		if authHeader == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing Authorization header"})
+		jwt_from_cookie := c.Cookies("jwt")
+		if jwt_from_cookie == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "No token provided"})
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Authorization header format. Expected 'Bearer <token>'"})
+		blacklistMutex.RLock()
+		if slices.Contains(blacklist, jwt_from_cookie) {
+			blacklistMutex.RUnlock()
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Token is blacklisted"})
 		}
+		blacklistMutex.RUnlock()
 
-		tokenString := parts[1]
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Check the signing method
+		token, err := jwt.Parse(jwt_from_cookie, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
@@ -144,17 +137,30 @@ func jwtMiddleware(secretKey []byte) fiber.Handler {
 		})
 
 		if err != nil {
-			log.Printf("JWT Parsing Error: %v", err)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid JWT token"})
+			if err.Error() == "token is expired" {
+				// Clear the expired cookie
+				c.Cookie(&fiber.Cookie{
+					Name:     "jwt",
+					Value:    "",
+					Expires:  time.Now().Add(-24 * time.Hour),
+					Path:     "/",
+					HTTPOnly: true,
+				})
+			}
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token"})
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			// Store the claims in the context for later use
-			c.Locals("user", claims) // or c.Locals("claims", claims)
+			if exp, ok := claims["exp"].(float64); ok {
+				if time.Now().Unix() > int64(exp) {
+					return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Token expired"})
+				}
+			}
+			c.Locals("user", claims)
 			return c.Next()
 		}
 
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid JWT token"})
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token"})
 	}
 }
 
@@ -174,73 +180,156 @@ func RegisterUser(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "User already exists or DB error"})
 	}
-	return c.JSON(fiber.Map{"message": "User registered successfully"})
-}
-
-func LogIn(c *fiber.Ctx) error {
-	var data struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := c.BodyParser(&data); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
-	}
-	var storedHash string
-	row := notes_db.QueryRow("SELECT password_hash FROM users WHERE login=?", data.Username)
-	if err := row.Scan(&storedHash); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Incorrect username"})
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(data.Password)); err != nil {
-		return c.Status(401).JSON(fiber.Map{"error": "Invalid password"})
-	}
 	claims := jwt.MapClaims{
 		"name": data.Username,
 		"exp":  time.Now().Add(time.Hour * 1).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	t, err := token.SignedString(jwtSecret)
+
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error signing JWT"})
 	}
-	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"token": t})
+	cookie := new(fiber.Cookie)
+	cookie.Name = "jwt"
+	cookie.Value = t
+	cookie.Expires = time.Now().Add(24 * time.Hour)
+	cookie.Path = "/"      // Add this
+	cookie.HTTPOnly = true // Add this
+	c.Cookie(cookie)
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message": "user registered  and logged in successfully", "token": t})
 }
+func LogIn(c *fiber.Ctx) error {
+    var username string
 
+    // --- Part 1: Try to authenticate via Cookie ---
+    jwt_from_cookie := c.Cookies("jwt")
+
+    blacklistMutex.RLock()
+    isBlacklisted := slices.Contains(blacklist, jwt_from_cookie)
+    blacklistMutex.RUnlock()
+
+    if jwt_from_cookie != "" && !isBlacklisted {
+        token, err := jwt.Parse(jwt_from_cookie, func(token *jwt.Token) (interface{}, error) {
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+            }
+            return jwtSecret, nil
+        })
+
+        if err == nil && token.Valid {
+            if claims, ok := token.Claims.(jwt.MapClaims); ok {
+                username, _ = claims["name"].(string)
+            }
+        }
+    }
+
+    // --- Part 2: Try credentials if cookie auth failed ---
+    if username == "" {
+        var data struct {
+            Username string `json:"username"`
+            Password string `json:"password"`
+        }
+        if err := c.BodyParser(&data); err != nil {
+            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+        }
+
+        var storedHash string
+        row := notes_db.QueryRow("SELECT password_hash FROM users WHERE login=?", data.Username)
+        if err := row.Scan(&storedHash); err != nil {
+            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+        }
+
+        if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(data.Password)); err != nil {
+            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+        }
+        username = data.Username
+    }
+
+    // --- Part 3: Create new token and set cookie ---
+    if username != "" {
+        // If we have an old cookie, add it to blacklist
+        if jwt_from_cookie != "" {
+            blacklistMutex.Lock()
+            blacklist = append(blacklist, jwt_from_cookie)
+            blacklistMutex.Unlock()
+        }
+
+        // Generate new token
+        expirationTime := time.Now().Add(24 * time.Hour)
+        claims := jwt.MapClaims{
+            "name": username,
+            "exp":  expirationTime.Unix(),
+        }
+        token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+        t, err := token.SignedString(jwtSecret)
+        if err != nil {
+            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+                "error": "Could not generate token",
+            })
+        }
+
+        // Set new cookie
+        cookie := &fiber.Cookie{
+            Name:     "jwt",
+            Value:    t,
+            Path:     "/",
+            Expires:  expirationTime,
+            HTTPOnly: true,
+            SameSite: "Lax",
+        }
+        c.Cookie(cookie)
+
+        return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+            "token": t,
+            "user":  username,
+        })
+    }
+
+    return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+        "error": "Authentication failed",
+    })
+}
 func LogOut(c *fiber.Ctx) error {
-	authHeader := c.Get("Authorization")
-	if len(authHeader) <= 7 || authHeader[:7] != "Bearer " {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Authorization header format"})
-	}
-	tokenString := authHeader[7:]
-	blacklist[tokenString] = true
-	return c.JSON(fiber.Map{"messsage": "Logged out"})
-}
+	jwt_from_cookie := c.Cookies("jwt")
 
-func jwtBlacklist(c *fiber.Ctx) error {
-	authHeader := c.Get("Authorization")
-	if authHeader == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing Authorization header"})
+	// Clear the cookie first - with all required attributes
+	cookie := &fiber.Cookie{
+		Name:     "jwt",
+		Value:    "",                              // Empty value
+		Path:     "/",                             // Same path as when setting
+		Domain:   "",                              // Same domain as when setting
+		Expires:  time.Now().Add(-24 * time.Hour), // Past date
+		HTTPOnly: true,                            // Same as when setting
+		SameSite: "Lax",                           // Same as when setting
+		Secure:   false,                           // Same as when setting
+	}
+	c.Cookie(cookie)
+
+	// Force clear any other variations of the cookie
+	c.Cookie(&fiber.Cookie{
+		Name:  "jwt",
+		Value: "",
+		Path:  "",
+	})
+
+	// Add to blacklist after clearing cookie
+	if jwt_from_cookie != "" {
+		blacklistMutex.Lock()
+		blacklist = append(blacklist, jwt_from_cookie)
+		blacklistMutex.Unlock()
 	}
 
-	tokenString := ""
-	_, err := fmt.Sscan(authHeader, &tokenString)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Authorization header format.  Expected 'Bearer <token>'"})
-	}
-
-	// Check if the token is blacklisted
-	if blacklist[tokenString] {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Token has been blacklisted",
-		})
-	}
-
-	return c.Next()
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Logged out successfully",
+	})
 }
 
 func CreateGeoNote(c *fiber.Ctx) error {
 	claims := c.Locals("user").(jwt.MapClaims)
 	username, ok := claims["name"].(string)
 	if !ok {
+		fmt.Println("Invalid username in claims")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Invalid username in claims"})
 	}
 	var data struct {
@@ -251,11 +340,12 @@ func CreateGeoNote(c *fiber.Ctx) error {
 		AllowedUsers []string `json:"allowed_users"`
 	}
 	if err := c.BodyParser(&data); err != nil {
+		fmt.Println("Invalid request")
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 	}
 	res, err := notes_db.Exec("INSERT INTO notes (note_text, longitude, lattitude, user_id, public) VALUES (?, ?, ?, ?, ?)", data.Text, data.Longitude, data.Lattitude, username, data.Public)
 	if err != nil {
-		
+		fmt.Println(err)
 		return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
 	}
 
@@ -263,7 +353,7 @@ func CreateGeoNote(c *fiber.Ctx) error {
 		note_id, err := res.LastInsertId()
 		if err != nil {
 			fmt.Println("LastInsertId did not work")
-			return c.Status(400).JSON(fiber.Map{"error": "Cannot extract las inserted id"})
+			return c.Status(400).JSON(fiber.Map{"error": "Cannot extract last inserted id"})
 		}
 		for _, allowed_user := range data.AllowedUsers {
 			_, err := notes_db.Exec("INSERT INTO note_access (note_id, user_login) VALUES (?, ?)", int(note_id), allowed_user)
@@ -313,27 +403,37 @@ func GetNotesWithinSquare(c *fiber.Ctx) error {
 	}
 	err := c.BodyParser(&data)
 	if err != nil {
-		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad json"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad json"})
 	}
 
 	rows, err := notes_db.Query(`SELECT id, note_text, longitude, lattitude, user_id, public FROM notes 
 	WHERE longitude > ? AND longitude < ? AND lattitude > ? AND lattitude < ?`, data.Lower_longitude,
 		data.Upper_longitude, data.Lower_lattitude, data.Upper_lattitude)
 	if err != nil {
-		c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Bad database request"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Bad database request"})
 	}
+	defer rows.Close()
+
 	var notes []NoteData
 	for rows.Next() {
 		var note NoteData
-		rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public)
+		err := rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error scanning note data"})
+		}
 		availiable, err := CheckIfAvailiable(c, note.ID)
 		if err != nil {
-			c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "availiability check failed"})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "availiability check failed"})
 		}
 		if availiable {
 			notes = append(notes, note)
 		}
 	}
+
+	if err = rows.Err(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error iterating over notes"})
+	}
+
 	c.Status(fiber.StatusAccepted)
 	return c.JSON(notes)
 }
@@ -353,7 +453,13 @@ func NotePermissionCheck(c *fiber.Ctx) error {
 
 	row_note_id := notes_db.QueryRow("SELECT user_id FROM notes WHERE id = ?", id)
 	var user_id_note string
-	row_note_id.Scan(&user_id_note)
+	err = row_note_id.Scan(&user_id_note)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Note not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Database error"})
+	}
 
 	if username != user_id_note {
 		fmt.Println(username + " " + user_id_note)
@@ -392,20 +498,30 @@ func GetNotesByUser(c *fiber.Ctx) error {
 	fmt.Println(user_id)
 	rows, err := notes_db.Query(`SELECT * FROM notes WHERE user_id=?`, user_id)
 	if err != nil {
-		c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Bad database request"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Bad database request"})
 	}
+	defer rows.Close()
+
 	var notes []NoteData
 	for rows.Next() {
 		var note NoteData
-		rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public)
+		err := rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error scanning note data"})
+		}
 		availiable, err := CheckIfAvailiable(c, note.ID)
 		if err != nil {
-			c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error checking availiability"})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error checking availiability"})
 		}
 		if availiable {
 			notes = append(notes, note)
 		}
 	}
+
+	if err = rows.Err(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error iterating over notes"})
+	}
+
 	c.Status(fiber.StatusAccepted)
 	return c.JSON(notes)
 }
@@ -413,7 +529,14 @@ func GetNotesByUser(c *fiber.Ctx) error {
 func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 	public_row := notes_db.QueryRow("SELECT public FROM notes WHERE id=?", id)
 	var public bool
-	public_row.Scan(&public)
+	err := public_row.Scan(&public)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, errors.New("note not found")
+		}
+		return false, err
+	}
+
 	if public {
 		return true, nil
 	} else {
@@ -431,6 +554,8 @@ func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 		if err != nil {
 			return false, errors.New("invalid database request")
 		}
+		defer pub_rows.Close()
+
 		for pub_rows.Next() {
 			var login_from_access_table string
 			err := pub_rows.Scan(&login_from_access_table)
@@ -443,4 +568,22 @@ func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 		}
 		return false, nil
 	}
+}
+
+func CheckSession(c *fiber.Ctx) error {
+	// The jwtMiddleware has already validated the token.
+	// We can now safely get the user's claims.
+	claims, ok := c.Locals("user").(jwt.MapClaims)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not parse user claims from token"})
+	}
+	username, ok := claims["name"].(string)
+	if !ok {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Username not found in token"})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "session is valid",
+		"user":    username,
+	})
 }
