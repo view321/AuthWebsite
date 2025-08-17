@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"slices"
 	"strconv"
-	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -30,8 +28,6 @@ type NoteData struct {
 
 var notes_db *sql.DB
 var jwtSecret = []byte("my_key_123")
-var blacklist []string
-var blacklistMutex sync.RWMutex
 
 func main() {
 	dsn := "root:347347@tcp(127.0.0.1:3306)/notes_db"
@@ -99,15 +95,11 @@ func optionalJWT(secretKey []byte) fiber.Handler {
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			blacklistMutex.RLock()
-			if slices.Contains(blacklist, tokenString) {
-				c.Locals("Registered", false)
+			if !jwtBlacklisted(tokenString) {
+				c.Locals("Registered", true)
+				c.Locals("user", claims)
 				return c.Next()
 			}
-			blacklistMutex.RUnlock()
-			c.Locals("Registered", true)
-			c.Locals("user", claims)
-			return c.Next()
 		}
 
 		c.Locals("Registered", false)
@@ -115,6 +107,16 @@ func optionalJWT(secretKey []byte) fiber.Handler {
 	}
 }
 
+func jwtBlacklisted(jwt string) bool {
+	row := notes_db.QueryRow("SELECT jwt FROM blacklist WHERE jwt=?", jwt)
+	var __jwt string
+	err := row.Scan(&__jwt)
+	return err==nil
+}
+
+func blacklist_jwt(jwt string){
+	notes_db.Exec("INSERT INTO blacklist jwt VALUES ?", jwt)
+}
 func jwtMiddleware(secretKey []byte) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		jwt_from_cookie := c.Cookies("jwt")
@@ -122,12 +124,9 @@ func jwtMiddleware(secretKey []byte) fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "No token provided"})
 		}
 
-		blacklistMutex.RLock()
-		if slices.Contains(blacklist, jwt_from_cookie) {
-			blacklistMutex.RUnlock()
+		if jwtBlacklisted(jwt_from_cookie) {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Token is blacklisted"})
 		}
-		blacklistMutex.RUnlock()
 
 		token, err := jwt.Parse(jwt_from_cookie, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -200,124 +199,108 @@ func RegisterUser(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message": "user registered  and logged in successfully", "token": t})
 }
 func LogIn(c *fiber.Ctx) error {
-    var username string
+	var username string
 
-    // --- Part 1: Try to authenticate via Cookie ---
-    jwt_from_cookie := c.Cookies("jwt")
+	jwt_from_cookie := c.Cookies("jwt")
 
-    blacklistMutex.RLock()
-    isBlacklisted := slices.Contains(blacklist, jwt_from_cookie)
-    blacklistMutex.RUnlock()
+	isBlacklisted := jwtBlacklisted(jwt_from_cookie)
 
-    if jwt_from_cookie != "" && !isBlacklisted {
-        token, err := jwt.Parse(jwt_from_cookie, func(token *jwt.Token) (interface{}, error) {
-            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-                return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-            }
-            return jwtSecret, nil
-        })
+	if jwt_from_cookie != "" && !isBlacklisted {
+		token, err := jwt.Parse(jwt_from_cookie, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return jwtSecret, nil
+		})
 
-        if err == nil && token.Valid {
-            if claims, ok := token.Claims.(jwt.MapClaims); ok {
-                username, _ = claims["name"].(string)
-            }
-        }
-    }
+		if err == nil && token.Valid {
+			if claims, ok := token.Claims.(jwt.MapClaims); ok {
+				username, _ = claims["name"].(string)
+			}
+		}
+	}
 
-    // --- Part 2: Try credentials if cookie auth failed ---
-    if username == "" {
-        var data struct {
-            Username string `json:"username"`
-            Password string `json:"password"`
-        }
-        if err := c.BodyParser(&data); err != nil {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
-        }
+	if username == "" {
+		var data struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := c.BodyParser(&data); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+		}
 
-        var storedHash string
-        row := notes_db.QueryRow("SELECT password_hash FROM users WHERE login=?", data.Username)
-        if err := row.Scan(&storedHash); err != nil {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
-        }
+		var storedHash string
+		row := notes_db.QueryRow("SELECT password_hash FROM users WHERE login=?", data.Username)
+		if err := row.Scan(&storedHash); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+		}
 
-        if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(data.Password)); err != nil {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
-        }
-        username = data.Username
-    }
+		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(data.Password)); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication failed"})
+		}
+		username = data.Username
+	}
 
-    // --- Part 3: Create new token and set cookie ---
-    if username != "" {
-        // If we have an old cookie, add it to blacklist
-        if jwt_from_cookie != "" {
-            blacklistMutex.Lock()
-            blacklist = append(blacklist, jwt_from_cookie)
-            blacklistMutex.Unlock()
-        }
+	if username != "" {
+		if jwt_from_cookie != "" {
+			
+		}
+		expirationTime := time.Now().Add(24 * time.Hour)
+		claims := jwt.MapClaims{
+			"name": username,
+			"exp":  expirationTime.Unix(),
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		t, err := token.SignedString(jwtSecret)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Could not generate token",
+			})
+		}
 
-        // Generate new token
-        expirationTime := time.Now().Add(24 * time.Hour)
-        claims := jwt.MapClaims{
-            "name": username,
-            "exp":  expirationTime.Unix(),
-        }
-        token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-        t, err := token.SignedString(jwtSecret)
-        if err != nil {
-            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-                "error": "Could not generate token",
-            })
-        }
+		cookie := &fiber.Cookie{
+			Name:     "jwt",
+			Value:    t,
+			Path:     "/",
+			Expires:  expirationTime,
+			HTTPOnly: true,
+			SameSite: "Lax",
+		}
+		c.Cookie(cookie)
 
-        // Set new cookie
-        cookie := &fiber.Cookie{
-            Name:     "jwt",
-            Value:    t,
-            Path:     "/",
-            Expires:  expirationTime,
-            HTTPOnly: true,
-            SameSite: "Lax",
-        }
-        c.Cookie(cookie)
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+			"token": t,
+			"user":  username,
+		})
+	}
 
-        return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-            "token": t,
-            "user":  username,
-        })
-    }
-
-    return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-        "error": "Authentication failed",
-    })
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		"error": "Authentication failed",
+	})
 }
 func LogOut(c *fiber.Ctx) error {
 	jwt_from_cookie := c.Cookies("jwt")
 
-	// Clear the cookie first - with all required attributes
 	cookie := &fiber.Cookie{
 		Name:     "jwt",
-		Value:    "",                              // Empty value
-		Path:     "/",                             // Same path as when setting
-		Domain:   "",                              // Same domain as when setting
-		Expires:  time.Now().Add(-24 * time.Hour), // Past date
-		HTTPOnly: true,                            // Same as when setting
-		SameSite: "Lax",                           // Same as when setting
-		Secure:   false,                           // Same as when setting
+		Value:    "",                              
+		Path:     "/",                         
+		Domain:   "",                              
+		Expires:  time.Now().Add(-24 * time.Hour), 
+		HTTPOnly: true,                            
+		SameSite: "Lax",                           
+		Secure:   false,                           
 	}
 	c.Cookie(cookie)
 
-	// Force clear any other variations of the cookie
 	c.Cookie(&fiber.Cookie{
 		Name:  "jwt",
 		Value: "",
 		Path:  "",
 	})
 
-	// Add to blacklist after clearing cookie
 	if jwt_from_cookie != "" {
-		blacklistMutex.Lock()
-		blacklist = append(blacklist, jwt_from_cookie)
-		blacklistMutex.Unlock()
+		blacklist_jwt(jwt_from_cookie)
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -571,8 +554,6 @@ func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 }
 
 func CheckSession(c *fiber.Ctx) error {
-	// The jwtMiddleware has already validated the token.
-	// We can now safely get the user's claims.
 	claims, ok := c.Locals("user").(jwt.MapClaims)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not parse user claims from token"})
