@@ -24,6 +24,7 @@ type NoteData struct {
 	Public       bool     `json:"public"`
 	UserID       string   `json:"user_id"`
 	AllowedUsers []string `json:"allowed_users"`
+	ParentID     int      `json:"parent_id"`
 }
 
 var notes_db *sql.DB
@@ -111,10 +112,10 @@ func jwtBlacklisted(jwt string) bool {
 	row := notes_db.QueryRow("SELECT jwt FROM blacklist WHERE jwt=?", jwt)
 	var __jwt string
 	err := row.Scan(&__jwt)
-	return err==nil
+	return err == nil
 }
 
-func blacklist_jwt(jwt string){
+func blacklist_jwt(jwt string) {
 	notes_db.Exec("INSERT INTO blacklist jwt VALUES ?", jwt)
 }
 func jwtMiddleware(secretKey []byte) fiber.Handler {
@@ -243,7 +244,7 @@ func LogIn(c *fiber.Ctx) error {
 
 	if username != "" {
 		if jwt_from_cookie != "" {
-			
+
 		}
 		expirationTime := time.Now().Add(24 * time.Hour)
 		claims := jwt.MapClaims{
@@ -283,13 +284,13 @@ func LogOut(c *fiber.Ctx) error {
 
 	cookie := &fiber.Cookie{
 		Name:     "jwt",
-		Value:    "",                              
-		Path:     "/",                         
-		Domain:   "",                              
-		Expires:  time.Now().Add(-24 * time.Hour), 
-		HTTPOnly: true,                            
-		SameSite: "Lax",                           
-		Secure:   false,                           
+		Value:    "",
+		Path:     "/",
+		Domain:   "",
+		Expires:  time.Now().Add(-24 * time.Hour),
+		HTTPOnly: true,
+		SameSite: "Lax",
+		Secure:   false,
 	}
 	c.Cookie(cookie)
 
@@ -321,15 +322,67 @@ func CreateGeoNote(c *fiber.Ctx) error {
 		Lattitude    float64  `json:"lattitude"`
 		Public       bool     `json:"public"`
 		AllowedUsers []string `json:"allowed_users"`
+		ParentID     int      `json:"parent_id"`
 	}
 	if err := c.BodyParser(&data); err != nil {
 		fmt.Println("Invalid request")
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 	}
-	res, err := notes_db.Exec("INSERT INTO notes (note_text, longitude, lattitude, user_id, public) VALUES (?, ?, ?, ?, ?)", data.Text, data.Longitude, data.Lattitude, username, data.Public)
-	if err != nil {
-		fmt.Println(err)
-		return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+
+	geo_identical_note := notes_db.QueryRow("SELECT note_text FROM notes WHERE longitude=? AND lattitude=?", data.Longitude, data.Lattitude)
+	var identical_test_text string
+	if err := geo_identical_note.Scan(&identical_test_text); err == nil {
+		fmt.Println("There is already a note in the position")
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid position for note"})
+	}
+
+	var res sql.Result
+	if data.ParentID == 0 {
+		var err error
+		res, err = notes_db.Exec("INSERT INTO notes (note_text, longitude, lattitude, user_id, public, parent_id) VALUES (?, ?, ?, ?, ?, ?)", data.Text, data.Longitude, data.Lattitude, username, data.Public, data.ParentID)
+		if err != nil {
+			fmt.Println(err)
+			return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+		}
+	} else {
+		row := notes_db.QueryRow("SELECT public, longitude, lattitude FROM notes WHERE id=?", data.ParentID)
+		var is_public bool
+		var longitude, lattitude float64
+		row.Scan(&is_public, &longitude, &lattitude)
+		if is_public {
+			_, err := notes_db.Exec("INSERT INTO notes (note_text, longitude, lattitude, user_id, public, parent_id) VALUES (?, ?, ?, ?, ?, ?)", data.Text, longitude, lattitude, username, true, data.ParentID)
+			if err != nil {
+				fmt.Println(err)
+				return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+			}
+			return c.JSON(fiber.Map{"message": "Note added successfully"})
+		} else {
+			rows, err := notes_db.Query("SELECT user_login FROM note_access WHERE note_id=?", data.ParentID)
+			if err != nil {
+				fmt.Println(err)
+				return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+			}
+			res, err = notes_db.Exec("INSERT INTO notes (note_text, longitude, lattitude, user_id, public, parent_id) VALUES (?, ?, ?, ?, ?, ?)", data.Text, longitude, lattitude, username, false, data.ParentID)
+			if err != nil {
+				fmt.Println(err)
+				return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+			}
+			note_id, err := res.LastInsertId()
+			if err != nil {
+				fmt.Println(err)
+				return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+			}
+			for rows.Next() {
+				var new_user string
+				rows.Scan(&new_user)
+				_, err := notes_db.Exec("INSERT note_id, user_login INTO note_access VALUES ?, ?", note_id, new_user)
+				if err != nil {
+					fmt.Println(err)
+					return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+				}
+			}
+			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message": "Note added successfully"})
+		}
 	}
 
 	if !data.Public {
@@ -350,6 +403,7 @@ func CreateGeoNote(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"message": "Note added successfully"})
+
 }
 
 func GetNoteByID(c *fiber.Ctx) error {
@@ -389,7 +443,7 @@ func GetNotesWithinSquare(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad json"})
 	}
 
-	rows, err := notes_db.Query(`SELECT id, note_text, longitude, lattitude, user_id, public FROM notes 
+	rows, err := notes_db.Query(`SELECT id, note_text, longitude, lattitude, user_id, public, parent_id FROM notes 
 	WHERE longitude > ? AND longitude < ? AND lattitude > ? AND lattitude < ?`, data.Lower_longitude,
 		data.Upper_longitude, data.Lower_lattitude, data.Upper_lattitude)
 	if err != nil {
@@ -400,13 +454,15 @@ func GetNotesWithinSquare(c *fiber.Ctx) error {
 	var notes []NoteData
 	for rows.Next() {
 		var note NoteData
-		err := rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public)
+		err := rows.Scan(&note.ID, &note.Text, &note.Longitude, &note.Lattitude, &note.UserID, &note.Public, &note.ParentID)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error scanning note data"})
+			fmt.Printf("Scan error: %v\n", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Error scanning note data: %v", err)})
 		}
 		availiable, err := CheckIfAvailiable(c, note.ID)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "availiability check failed"})
+			fmt.Printf("CheckIfAvailiable error for note ID %d: %v\n", note.ID, err)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("availiability check failed: %v", err)})
 		}
 		if availiable {
 			notes = append(notes, note)
@@ -422,7 +478,11 @@ func GetNotesWithinSquare(c *fiber.Ctx) error {
 }
 
 func NotePermissionCheck(c *fiber.Ctx) error {
-	claims := c.Locals("user").(jwt.MapClaims)
+	userClaims := c.Locals("user")
+	if userClaims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated"})
+	}
+	claims := userClaims.(jwt.MapClaims)
 	username, ok := claims["name"].(string)
 	if !ok {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Invalid username in claims"})
@@ -454,6 +514,16 @@ func NotePermissionCheck(c *fiber.Ctx) error {
 
 func DeleteNoteByID(c *fiber.Ctx) error {
 	id := c.Locals("id")
+	child_row := notes_db.QueryRow("SELECT note_text FROM notes WHERE parent_id = ?", id)
+	var note_text string
+	if err := child_row.Scan(&note_text); err == nil {
+		_, err := notes_db.Exec("UPDATE notes SET note_text = \"[Deleted]\" WHERE id=?", id)
+		if err != nil {
+			fmt.Println("Error clearing a node")
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error clearing a node"})
+		}
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message": "Successfully cleared note"})
+	}
 	_, err := notes_db.Exec("DELETE FROM notes WHERE id = ?", id)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid database request"})
@@ -468,6 +538,17 @@ func UpdateNoteByID(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "wrong json"})
 	}
+	if data.ParentID != 0 {
+		var parent_data NoteData
+		row := notes_db.QueryRow("SELECT longitude, lattitude FROM notes WHERE id=?", data.ParentID)
+		err := row.Scan(&parent_data.Longitude, &parent_data.Lattitude)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "cannot parse parent"})
+		}
+		data.Lattitude = parent_data.Lattitude
+		data.Longitude = parent_data.Longitude
+	}
+
 	_, err = notes_db.Exec("UPDATE notes SET note_text=?, longitude=?, lattitude=? WHERE id=?", data.Text, data.Longitude, data.Lattitude, id)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
@@ -523,7 +604,15 @@ func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 	if public {
 		return true, nil
 	} else {
-		var registered bool = c.Locals("Registered").(bool)
+		// Check if user is registered - handle nil case
+		registeredValue := c.Locals("Registered")
+		if registeredValue == nil {
+			return false, errors.New("registration status not found")
+		}
+		registered, ok := registeredValue.(bool)
+		if !ok {
+			return false, errors.New("invalid registration status type")
+		}
 		if !registered {
 			return false, errors.New("not registered")
 		}
@@ -533,6 +622,19 @@ func CheckIfAvailiable(c *fiber.Ctx, id int) (bool, error) {
 		if !ok {
 			return false, errors.New("invalid username in claims")
 		}
+
+		// First check if the user is the owner of the note
+		owner_row := notes_db.QueryRow("SELECT user_id FROM notes WHERE id=?", id)
+		var note_owner string
+		err := owner_row.Scan(&note_owner)
+		if err != nil {
+			return false, errors.New("note not found")
+		}
+		if note_owner == username {
+			return true, nil
+		}
+
+		// Then check if the user has access through the note_access table
 		pub_rows, err := notes_db.Query("SELECT user_login FROM note_access WHERE note_id=?", id)
 		if err != nil {
 			return false, errors.New("invalid database request")
