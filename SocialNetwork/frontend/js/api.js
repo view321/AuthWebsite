@@ -45,10 +45,17 @@ class ApiService {
     });
   }
 
-  async register(username, password) {
+  async sendEmailVerification(email) {
+    return this.request('/api/send_email_key', {
+      method: 'POST',
+      body: JSON.stringify({ email })
+    });
+  }
+
+  async register(username, password, email, emailKey) {
     return this.request(CONFIG.API.ENDPOINTS.REGISTER, {
       method: 'POST',
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, email, email_key: emailKey })
     });
   }
 

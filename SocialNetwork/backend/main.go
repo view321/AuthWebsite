@@ -1,15 +1,17 @@
 package main
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
-	"time"
 	"math/rand/v2"
 	"net/smtp"
+	"strconv"
 	"strings"
+	"time"
+	"os"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v2"
@@ -50,7 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer smtp_client.Quit() 
+	defer smtp_client.Quit()
 
 	app := fiber.New()
 	app.Use(logger.New())
@@ -177,82 +179,74 @@ func jwtMiddleware(secretKey []byte) fiber.Handler {
 	}
 }
 
-func SendEmailKey(c *fiber.Ctx) error{
+func SendEmailKey(c *fiber.Ctx) error {
 	var email struct {
 		Email string `json:"email"`
 	}
-	err := c.BodyParser(&email.Email)
-	if err != nil{
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Cannot parse error"})
+	err := c.BodyParser(&email)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot parse email"})
 	}
 	randomNumber := rand.IntN(900000) + 100000
 
 	row := notes_db.QueryRow("SELECT email_key FROM email_keys WHERE email=?", email.Email)
 	var test_for_scan string
 	err = row.Scan(&test_for_scan)
-	if err == nil{
-		_, err := notes_db.Exec("UPDATE email_keys SET email_key=? WHERE email=?", strconv.Itoa(randomNumber), email.Email)
-		if err != nil{
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error":"Cannot update table"})
-		}
-	}else{
-		_, err := notes_db.Exec("INSERT INTO email_keys email, email_key VALUES ?, ?", email.Email, strconv.Itoa(randomNumber))
-		if err != nil{
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error":"Cannot add row to table"})
-		}
+	if err == nil {
+		return c.Status(fiber.StatusNotAcceptable).JSON(fiber.Map{"error": "Email already used"})
 	}
 
-	from := "verify_email@sandbox2c950af4cb4743ccb82a5a406e062642.mailgun.org"
-    to := []string{email.Email}
+	from := "noreply@geonote.space"
+	to := []string{email.Email}
 
-    subject := "Verification code"
-    body := strconv.Itoa(randomNumber)
+	subject := "Verification code"
+	body := strconv.Itoa(randomNumber)
 	msg := "From: " + from + "\r\n" +
-        "To: " + strings.Join(to, ",") + "\r\n" +
-        "Subject: " + subject + "\r\n" +
-        "\r\n" +
-        body + "\r\n"
-	if err := smtp_client.Mail(from); err != nil{
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Cannot start sending email"})
+		"To: " + strings.Join(to, ",") + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"\r\n" +
+		body + "\r\n"
+	if err := smtp_client.Mail(from); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
 	}
 	for _, address := range to {
-        if err := smtp_client.Rcpt(address); err != nil {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Issue with rcpt"})
-        }
-    }
+		if err := smtp_client.Rcpt(address); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Issue with rcpt"})
+		}
+	}
 	w, err := smtp_client.Data()
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Issue with smtp_client.Data()"})
-    }
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("%v", err)})
+	}
 	_, err = w.Write([]byte(msg))
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Issue with writing to client"})
-    }
-    err = w.Close()
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"Issue with closing client"})
-    }
-	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message":"Email sent successfully"})
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Issue with writing to client"})
+	}
+	err = w.Close()
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Issue with closing client"})
+	}
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"message": "Email sent successfully"})
 }
 
 func RegisterUser(c *fiber.Ctx) error {
 	var data struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
-		Email string `json:"email"`
-		EmailKey    string `json:"email_key"`
+		Email    string `json:"email"`
+		EmailKey string `json:"email_key"`
 	}
 	if err := c.BodyParser(&data); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 	}
 	row := notes_db.QueryRow("SELECT email_key FROM email_keys WHERE email=?", data.Email)
 	var email_key string
-	err  := row.Scan(&email_key)
-	if err != nil{
+	err := row.Scan(&email_key)
+	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Cannot scan email key"})
 	}
-	if email_key != data.EmailKey{
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error":"wrong email key"})
+	if email_key != data.EmailKey {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "wrong email key"})
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(data.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -271,6 +265,10 @@ func RegisterUser(c *fiber.Ctx) error {
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error signing JWT"})
+	}
+	_, err = notes_db.Exec("INSERT INTO email_keys email, email_key VALUES ?, ?", data.Email, data.EmailKey)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Cannot add row to table"})
 	}
 	cookie := new(fiber.Cookie)
 	cookie.Name = "jwt"
@@ -754,13 +752,53 @@ func CheckSession(c *fiber.Ctx) error {
 }
 
 func setupSMTPClient() (*smtp.Client, error) {
-    auth := smtp.PlainAuth("", "verify_email@sandbox2c950af4cb4743ccb82a5a406e062642.mailgun.org", "C7fX23VR9n@5t!@", "smtp.mailgun.org")
-    client, err := smtp.Dial("smtp.mailgun.org:587")
-    if err != nil {
-        return nil, err
-    }
-    if err := client.Auth(auth); err != nil {
-        return nil, err
-    }
-    return client, nil
+	// Get SMTP configuration from environment variables
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	smtpUser := os.Getenv("SMTP_USER")
+	smtpPass := os.Getenv("SMTP_PASS")
+
+	// Use defaults if environment variables are not set
+	if smtpHost == "" {
+		smtpHost = "geonote.space" // Try common mail server format first
+	}
+	if smtpPort == "" {
+		smtpPort = "587"
+	}
+	if smtpUser == "" {
+		smtpUser = "noreply"
+	}
+	if smtpPass == "" {
+		smtpPass = "347347"
+	}
+
+	log.Printf("Attempting SMTP connection to %s:%s with user %s", smtpHost, smtpPort, smtpUser)
+
+	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
+	client, err := smtp.Dial(smtpHost + ":" + smtpPort)
+	if err != nil {
+		log.Printf("Failed to dial SMTP server: %v", err)
+		return nil, err
+	}
+
+	// Start TLS encryption
+	tlsConfig := &tls.Config{
+		ServerName:         smtpHost,
+		InsecureSkipVerify: true, // More secure
+	}
+	
+	if err := client.StartTLS(tlsConfig); err != nil {
+		log.Printf("Failed to start TLS: %v", err)
+		client.Quit()
+		return nil, err
+	}
+
+	if err := client.Auth(auth); err != nil {
+		log.Printf("SMTP authentication failed: %v", err)
+		client.Quit()
+		return nil, err
+	}
+
+	log.Printf("SMTP client setup successful")
+	return client, nil
 }

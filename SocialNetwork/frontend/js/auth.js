@@ -7,6 +7,8 @@ class AuthManager {
     console.log('🔍 AuthManager constructor called'); // Debug log
     this.isLoggedIn = false;
     this.currentUser = null;
+    this.registrationStep = 'login'; // 'login', 'register', 'verify'
+    this.pendingRegistration = null;
     this.setupEventListeners();
   }
 
@@ -35,12 +37,18 @@ class AuthManager {
     // Login and register buttons
     const loginButton = document.getElementById('login-button');
     const registerButton = document.getElementById('register-button');
+    const sendVerificationButton = document.getElementById('send-verification-button');
+    const verifyRegisterButton = document.getElementById('verify-register-button');
+    const backToLoginButton = document.getElementById('back-to-login-button');
 
     loginButton.addEventListener('click', () => {
       console.log('🔍 Login button clicked'); // Debug log
       this.handleLogin();
     });
-    registerButton.addEventListener('click', () => this.handleRegister());
+    registerButton.addEventListener('click', () => this.showRegistrationForm());
+    sendVerificationButton.addEventListener('click', () => this.handleSendVerification());
+    verifyRegisterButton.addEventListener('click', () => this.handleVerifyAndRegister());
+    backToLoginButton.addEventListener('click', () => this.showLoginForm());
 
     // Logout button
     logoutButton.addEventListener('click', () => this.handleLogout());
@@ -85,32 +93,152 @@ class AuthManager {
     }
   }
 
-  async handleRegister() {
+  showRegistrationForm() {
+    this.registrationStep = 'register';
+    
+    // Show email field and hide login-specific elements
+    document.getElementById('email-group').style.display = 'block';
+    document.getElementById('login-button').style.display = 'none';
+    document.getElementById('register-button').style.display = 'none';
+    document.getElementById('send-verification-button').style.display = 'block';
+    document.getElementById('back-to-login-button').style.display = 'block';
+    
+    // Update header text
+    document.querySelector('.auth-header h2').textContent = 'Create Account';
+    document.querySelector('.auth-header p').textContent = 'Enter your details to create a new account';
+  }
+
+  showLoginForm() {
+    this.registrationStep = 'login';
+    
+    // Hide registration-specific elements
+    document.getElementById('email-group').style.display = 'none';
+    document.getElementById('verification-group').style.display = 'none';
+    document.getElementById('send-verification-button').style.display = 'none';
+    document.getElementById('verify-register-button').style.display = 'none';
+    document.getElementById('back-to-login-button').style.display = 'none';
+    
+    // Show login elements
+    document.getElementById('login-button').style.display = 'block';
+    document.getElementById('register-button').style.display = 'block';
+    
+    // Reset header text
+    document.querySelector('.auth-header h2').textContent = 'Welcome to GeoNotes';
+    document.querySelector('.auth-header p').textContent = 'Sign in to create and manage your location-based notes';
+    
+    // Clear form
+    this.clearForm();
+  }
+
+  showVerificationForm() {
+    this.registrationStep = 'verify';
+    
+    // Show verification field and hide send verification button
+    document.getElementById('verification-group').style.display = 'block';
+    document.getElementById('send-verification-button').style.display = 'none';
+    document.getElementById('verify-register-button').style.display = 'block';
+    
+    // Update header text
+    document.querySelector('.auth-header h2').textContent = 'Verify Email';
+    document.querySelector('.auth-header p').textContent = 'Enter the verification code sent to your email';
+    
+    // Focus on verification code input
+    setTimeout(() => {
+      document.getElementById('verification-code').focus();
+    }, 100);
+  }
+
+  async handleSendVerification() {
     const username = document.getElementById('username').value;
     const password = document.getElementById('password').value;
+    const email = document.getElementById('email').value;
 
-    if (!username || !password) {
+    if (!username || !password || !email) {
       showMessage('Please fill in all fields', 'error');
       return;
     }
 
-    const registerButton = document.getElementById('register-button');
-    const originalText = registerButton.innerHTML;
-    registerButton.innerHTML = createLoadingSpinner().outerHTML;
-    registerButton.disabled = true;
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      showMessage('Please enter a valid email address', 'error');
+      return;
+    }
+
+    const sendButton = document.getElementById('send-verification-button');
+    const originalText = sendButton.innerHTML;
+    sendButton.innerHTML = createLoadingSpinner().outerHTML;
+    sendButton.disabled = true;
 
     try {
-      await apiService.register(username, password);
-      showMessage('Registration successful! You can now login.', 'success');
-      document.getElementById('username').value = '';
-      document.getElementById('password').value = '';
+      await apiService.sendEmailVerification(email);
+      
+      // Store registration data for later use
+      this.pendingRegistration = { username, password, email };
+      
+      showMessage('Verification code sent to your email!', 'success');
+      this.showVerificationForm();
+    } catch (error) {
+      console.error('Email verification error:', error);
+      showMessage('Failed to send verification code. Please try again.', 'error');
+    } finally {
+      sendButton.innerHTML = originalText;
+      sendButton.disabled = false;
+    }
+  }
+
+  async handleVerifyAndRegister() {
+    const verificationCode = document.getElementById('verification-code').value;
+
+    if (!verificationCode) {
+      showMessage('Please enter the verification code', 'error');
+      return;
+    }
+
+    if (!this.pendingRegistration) {
+      showMessage('Registration data not found. Please start over.', 'error');
+      this.showLoginForm();
+      return;
+    }
+
+    const verifyButton = document.getElementById('verify-register-button');
+    const originalText = verifyButton.innerHTML;
+    verifyButton.innerHTML = createLoadingSpinner().outerHTML;
+    verifyButton.disabled = true;
+
+    try {
+      const { username, password, email } = this.pendingRegistration;
+      const response = await apiService.register(username, password, email, verificationCode);
+      
+      showMessage('Registration successful! You are now logged in.', 'success');
+      
+      // Auto-login after successful registration
+      await this.loginSuccess(response);
+      
+      // Clear pending registration data
+      this.pendingRegistration = null;
+      
     } catch (error) {
       console.error('Registration error:', error);
-      showMessage('Registration failed. Username might already exist.', 'error');
+      if (error.message.includes('wrong email key')) {
+        showMessage('Invalid verification code. Please check your email and try again.', 'error');
+      } else if (error.message.includes('already exists')) {
+        showMessage('Username already exists. Please choose a different username.', 'error');
+        this.showRegistrationForm();
+      } else {
+        showMessage('Registration failed. Please try again.', 'error');
+      }
     } finally {
-      registerButton.innerHTML = originalText;
-      registerButton.disabled = false;
+      verifyButton.innerHTML = originalText;
+      verifyButton.disabled = false;
     }
+  }
+
+  clearForm() {
+    document.getElementById('username').value = '';
+    document.getElementById('password').value = '';
+    document.getElementById('email').value = '';
+    document.getElementById('verification-code').value = '';
   }
 
   async handleLogout() {

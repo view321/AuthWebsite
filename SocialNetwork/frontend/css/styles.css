@@ -409,6 +409,26 @@ body {
   line-height: 1.4;
 }
 
+/* === Email Verification Styles === */
+.verification-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-light);
+  margin-top: 0.25rem;
+  font-style: italic;
+}
+
+.btn-success {
+  background: var(--success-color);
+  color: var(--white);
+}
+
+.btn-success:hover {
+  background: #16a34a;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
 /* === Helper Classes === */
 .message {
   position: fixed;
